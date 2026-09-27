@@ -1,0 +1,63 @@
+from datetime import datetime
+from typing import Protocol
+
+from app.db.models import (
+    InternalAdmin,
+    RecurrenceSeries,
+    ScheduledNotification,
+    Task,
+    TaskEvent,
+    User,
+)
+
+
+class UserRepository(Protocol):
+    async def get_by_id(self, user_id: int) -> User | None: ...
+
+    async def get_by_telegram_id(self, telegram_user_id: int) -> User | None: ...
+
+    async def get_by_username(self, username: str) -> User | None: ...
+
+    async def save(self, user: User) -> User: ...
+
+
+class TaskRepository(Protocol):
+    async def get(self, task_id: int, *, for_update: bool = False) -> Task | None: ...
+
+    async def save(self, task: Task) -> Task: ...
+
+    async def list_active(
+        self, chat_id: int, *, offset: int = 0, limit: int = 10
+    ) -> list[Task]: ...
+
+
+class TaskEventRepository(Protocol):
+    async def add(self, event: TaskEvent) -> TaskEvent: ...
+
+    async def list_for_task(self, task_id: int) -> list[TaskEvent]: ...
+
+
+class RecurrenceRepository(Protocol):
+    async def get(self, series_id: int, *, for_update: bool = False) -> RecurrenceSeries | None: ...
+
+    async def save(self, series: RecurrenceSeries) -> RecurrenceSeries: ...
+
+    async def due_series(self, now: datetime, limit: int = 100) -> list[RecurrenceSeries]: ...
+
+
+class AdminRepository(Protocol):
+    async def get(self, user_id: int) -> InternalAdmin | None: ...
+
+    async def list_all(self) -> list[InternalAdmin]: ...
+
+    async def add(self, admin: InternalAdmin) -> InternalAdmin: ...
+
+    async def remove(self, user_id: int) -> None: ...
+
+
+class NotificationRepository(Protocol):
+    async def add(self, notification: ScheduledNotification) -> ScheduledNotification: ...
+
+    async def get_by_deduplication_key(self, key: str) -> ScheduledNotification | None: ...
+
+    async def claim_due(self, now: datetime, limit: int = 100) -> list[ScheduledNotification]: ...

@@ -1,0 +1,4 @@
+FROM postgres:16-alpine
+
+# The backup schedule uses Europe/Moscow through the container's local date command.
+RUN apk add --no-cache tzdata
