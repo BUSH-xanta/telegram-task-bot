@@ -4,7 +4,7 @@ from datetime import datetime
 from uuid import uuid4
 
 from aiogram import Bot, F, Router
-from aiogram.filters import Command, CommandObject
+from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
@@ -58,7 +58,7 @@ async def task_command(
     await start_wizard(message, state, command.args, settings, user_service)
 
 
-@router.message(F.text.regexp(BOT_MENTION))
+@router.message(StateFilter(None), F.text.regexp(BOT_MENTION))
 async def mention_task(
     message: Message, state: FSMContext, bot: Bot, settings: Settings, user_service
 ) -> None:

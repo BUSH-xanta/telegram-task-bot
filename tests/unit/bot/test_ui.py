@@ -4,7 +4,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from aiogram.types import CallbackQuery, Chat, InaccessibleMessage, Message, User
+from aiogram import Bot, Dispatcher
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import CallbackQuery, Chat, InaccessibleMessage, Message, Update, User
 
 from app.bot.common import (
     BotTaskCardPublisher,
@@ -14,6 +16,7 @@ from app.bot.common import (
     service_error,
 )
 from app.bot.handlers.wizard import confirm_task, start_wizard
+from app.bot.handlers.wizard import router as wizard_router
 from app.bot.keyboards import task_list
 from app.bot.renderers import draft_card, task_card
 from app.bot.states import TaskWizard
@@ -85,6 +88,40 @@ async def test_command_title_skips_title_prompt():
     assert state.current == TaskWizard.description_choice.state
     assert state.data["title"] == "Заказать значки"
     message.answer.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_assignee_message_starting_with_at_reaches_wizard(monkeypatch):
+    bot = Bot(token="123456:abcdefghijklmnopqrstuvwxyzABCDE")
+    dispatcher = Dispatcher(storage=MemoryStorage())
+    dispatcher.include_router(wizard_router)
+    dispatcher["user_service"] = SimpleNamespace(
+        resolve_assignees=AsyncMock(
+            return_value=[
+                SimpleNamespace(user_id=7, username="author", private_chat_started=True)
+            ]
+        )
+    )
+    monkeypatch.setattr(Bot, "get_me", AsyncMock(return_value=SimpleNamespace(username="taskbot")))
+    answer = AsyncMock()
+    monkeypatch.setattr(Message, "answer", answer)
+    actor = User(id=45, is_bot=False, first_name="Author", username="author")
+    message = Message(
+        message_id=1,
+        date=datetime.now(UTC),
+        chat=Chat(id=-1001, type="supergroup"),
+        from_user=actor,
+        text="@author",
+    )
+    state = dispatcher.fsm.get_context(bot=bot, chat_id=-1001, user_id=45)
+    await state.set_state(TaskWizard.assignees)
+    try:
+        await dispatcher.feed_update(bot, Update(update_id=1, message=message))
+        assert await state.get_state() == TaskWizard.deadline.state
+        assert (await state.get_data())["assignee_user_ids"] == [7]
+        answer.assert_awaited_once_with("Укажите дедлайн в формате ДД.ММ.ГГГГ.")
+    finally:
+        await bot.session.close()
 
 
 @pytest.mark.asyncio
