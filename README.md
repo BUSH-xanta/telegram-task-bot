@@ -1,0 +1,37 @@
+# Telegram Task Bot
+
+Одногрупповой таск-трекер для Telegram на Python 3.12, aiogram 3, PostgreSQL и Redis.
+
+## Запуск
+
+1. Скопируйте `.env.example` в `.env`, укажите токен Telegram, ID рабочей группы, ID первого внутреннего администратора и пароль PostgreSQL. `DATABASE_URL` должен использовать тот же пароль. Не добавляйте `.env` в Git.
+2. Добавьте бота администратором рабочей группы. Отключите privacy mode через BotFather, чтобы бот получал обычные сообщения и обращения по `@username`.
+3. Запустите `docker compose up -d --build`. Сервис `migrate` выполнит `alembic upgrade head` до запуска bot и worker. Для просмотра логов: `docker compose logs -f bot worker`.
+
+Контейнеры `bot`, `worker`, `postgres`, `redis`, `backup` используют `restart: unless-stopped`; `migrate` запускается один раз перед ними. Постоянные данные PostgreSQL и Redis лежат в Docker volumes. Бэкапы сохраняются в `./backups`; каталог нужно включить в резервное копирование VPS. Сервис backup создаёт dump ежедневно в 03:00 `Europe/Moscow` и хранит 14 последних файлов.
+
+## Границы слоёв
+
+- `app/bot`: команды, FSM, кнопки и отображение карточек; SQL запросов здесь нет.
+- `app/services`: проверка прав, переходы задачи, проверка участников и повторения.
+- `app/db/repositories`: SQL доступ к моделям; Protocol контракты описаны в `interfaces.py`.
+- `app/scheduler`: постоянное расписание, доставку и повторные попытки обеспечивает worker.
+- `app/domain`: общие enum, Pydantic DTO, ошибки и порты для Telegram API.
+
+Все транзакции открываются на уровне service/worker через `AsyncSession`. Для конкурентного перехода задачи service блокирует строку `Task` через `SELECT ... FOR UPDATE`; для серии повторения — строку `RecurrenceSeries`. Уникальный индекс `(recurrence_series_id, scheduled_due_at)` дополнительно предотвращает создание двух задач на один период. При изменении повторяющейся задачи service обновляет текущую задачу и шаблон серии в одной транзакции. `scheduled_due_at` сохраняет дату периода; `due_at` может меняться при переносе конкретного экземпляра.
+
+`ScheduledNotification` хранит логическое событие, а `NotificationDelivery` — отдельную доставку в группу или ЛС. Уникальный `deduplication_key` исключает повторное планирование; `claimed_until`, `status`, `attempt_count` и `next_attempt_at` нужны worker для конкуренции и retry. Точное отсутствие повторной отправки после сетевого сбоя Telegram невозможно гарантировать без idempotency в Bot API: worker использует сохранённое состояние и lease, чтобы свести повтор к минимуму.
+
+Все datetime хранятся как timezone-aware. Бизнес-даты рассчитываются в `Europe/Moscow`; дедлайн — 23:59:59 указанного дня. PostgreSQL — постоянный источник данных; Redis хранит только FSM и краткоживущие блокировки.
+
+## Разработка
+
+```bash
+python -m pip install -e '.[dev]'
+ruff check .
+python -m compileall -q app alembic
+pytest
+```
+
+Для интеграционных тестов нужен отдельный PostgreSQL. Бот использует только long polling; при переходе на webhook его необходимо выключить, прежде чем включать webhook.
+
