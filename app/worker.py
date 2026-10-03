@@ -5,6 +5,7 @@ import logging
 
 from aiogram import Bot
 
+from app.bot.topic import GroupTopicMiddleware
 from app.config import get_settings
 from app.db.session import make_session_factory
 from app.scheduler.worker import SchedulerWorker
@@ -15,6 +16,9 @@ async def main() -> None:
     settings = get_settings()
     session_factory = make_session_factory(settings.database_url)
     bot = Bot(token=settings.bot_token.get_secret_value())
+    bot.session.middleware(
+        GroupTopicMiddleware(settings.allowed_chat_id, settings.allowed_message_thread_id)
+    )
     worker = SchedulerWorker(session_factory, bot, settings.allowed_chat_id, settings.bot_owner_id)
     logging.info("Worker started")
     try:

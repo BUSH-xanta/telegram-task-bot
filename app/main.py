@@ -7,6 +7,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.redis import RedisStorage
 
 from app.bot.setup import setup_dispatcher
+from app.bot.topic import GroupTopicMiddleware
 from app.config import get_settings
 
 
@@ -22,6 +23,9 @@ async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     storage = RedisStorage.from_url(settings.redis_url)
     bot = Bot(token=settings.bot_token.get_secret_value())
+    bot.session.middleware(
+        GroupTopicMiddleware(settings.allowed_chat_id, settings.allowed_message_thread_id)
+    )
     dispatcher = Dispatcher(storage=storage)
     setup_dispatcher(dispatcher, bot, settings)
     try:

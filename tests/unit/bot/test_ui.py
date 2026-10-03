@@ -81,7 +81,9 @@ def test_unknown_assignee_message_is_russian():
 async def test_command_title_skips_title_prompt():
     state = FakeState()
     actor = SimpleNamespace(id=45, username="author", first_name="Author", last_name=None)
-    message = SimpleNamespace(chat=SimpleNamespace(id=-1001), from_user=actor, answer=AsyncMock())
+    message = SimpleNamespace(
+        chat=SimpleNamespace(id=-1001), from_user=actor, answer=AsyncMock(), bot=AsyncMock()
+    )
     settings = SimpleNamespace(allowed_chat_id=-1001)
     users = SimpleNamespace(upsert_from_telegram=AsyncMock(return_value=SimpleNamespace(id=7)))
     await start_wizard(message, state, "Заказать значки", settings, users)
@@ -97,9 +99,7 @@ async def test_assignee_message_starting_with_at_reaches_wizard(monkeypatch):
     dispatcher.include_router(wizard_router)
     dispatcher["user_service"] = SimpleNamespace(
         resolve_assignees=AsyncMock(
-            return_value=[
-                SimpleNamespace(user_id=7, username="author", private_chat_started=True)
-            ]
+            return_value=[SimpleNamespace(user_id=7, username="author", private_chat_started=True)]
         )
     )
     monkeypatch.setattr(Bot, "get_me", AsyncMock(return_value=SimpleNamespace(username="taskbot")))
@@ -130,6 +130,7 @@ async def test_confirm_creates_once_from_preview():
     today = (now_moscow().date() + timedelta(days=1)).strftime("%d.%m.%Y")
     state.data = {
         "draft_id": "abc",
+        "wizard_messages": [[-1001, 10], [-1001, 11]],
         "creator_user_id": 7,
         "title": "Значки",
         "priority": "HIGH",
@@ -143,6 +144,7 @@ async def test_confirm_creates_once_from_preview():
         from_user=SimpleNamespace(id=45),
         message=SimpleNamespace(answer=AsyncMock()),
         answer=AsyncMock(),
+        bot=AsyncMock(),
     )
     tasks = SimpleNamespace(create=AsyncMock(return_value=SimpleNamespace(id=42)))
     publisher = SimpleNamespace(publish=AsyncMock(return_value=123))
@@ -151,6 +153,10 @@ async def test_confirm_creates_once_from_preview():
     assert data.assignee_user_ids == [8, 9]
     assert data.due_at.hour == 23 and data.due_at.minute == 59
     assert publisher.publish.await_count == 1
+    assert [call.args for call in callback.bot.delete_message.await_args_list] == [
+        (-1001, 10),
+        (-1001, 11),
+    ]
     assert state.current is None
 
 
@@ -305,9 +311,7 @@ async def test_inaccessible_callback_is_rejected_before_handlers(monkeypatch):
         id="old",
         from_user=User(id=45, is_bot=False, first_name="Author"),
         chat_instance="x",
-        message=InaccessibleMessage(
-            message_id=1, date=0, chat=Chat(id=-1001, type="supergroup")
-        ),
+        message=InaccessibleMessage(message_id=1, date=0, chat=Chat(id=-1001, type="supergroup")),
         data="task:42:complete",
     )
     answer = AsyncMock()

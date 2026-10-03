@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     bot_token: SecretStr
     bot_owner_id: int
     allowed_chat_id: int
+    allowed_message_thread_id: int | None = Field(default=None, gt=0)
     database_url: str
     redis_url: str
     timezone: str = "Europe/Moscow"

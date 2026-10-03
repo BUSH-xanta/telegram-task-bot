@@ -9,9 +9,16 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from app.bot import keyboards
-from app.bot.common import BotTaskCardPublisher, answer_action_error, parse_date, parse_usernames
+from app.bot.common import (
+    BotTaskCardPublisher,
+    answer_action_error,
+    parse_date,
+    parse_usernames,
+    service_error,
+)
 from app.bot.renderers import draft_card
 from app.bot.states import TaskWizard
+from app.bot.wizard_cleanup import cleanup_wizard, remember_message, wizard_answer
 from app.config.settings import Settings
 from app.domain.enums import RecurrenceUnit, TaskPriority
 from app.domain.schemas import RecurrenceConfig, TaskCreateData
@@ -35,7 +42,9 @@ async def start_wizard(
         message.from_user.last_name,
         is_chat_member=True,
     )
+    await cleanup_wizard(state, message.bot)
     await state.clear()
+    await remember_message(state, message)
     await state.update_data(
         draft_id=uuid4().hex,
         creator_user_id=user.id,
@@ -45,10 +54,12 @@ async def start_wizard(
     if title and title.strip():
         await state.update_data(title=title.strip()[:512])
         await state.set_state(TaskWizard.description_choice)
-        await message.answer("Добавить описание?", reply_markup=keyboards.description())
+        await wizard_answer(
+            message, state, "Добавить описание?", reply_markup=keyboards.description()
+        )
     else:
         await state.set_state(TaskWizard.title)
-        await message.answer("Новая задача\n\nНапишите название задачи.")
+        await wizard_answer(message, state, "Новая задача\n\nНапишите название задачи.")
 
 
 @router.message(Command("task"))
@@ -71,46 +82,54 @@ async def mention_task(
 
 @router.message(TaskWizard.title, F.text)
 async def title_input(message: Message, state: FSMContext) -> None:
+    await remember_message(state, message)
     value = message.text.strip()
     if not value or len(value) > 512:
-        await message.answer("Название должно содержать от 1 до 512 символов.")
+        await wizard_answer(message, state, "Название должно содержать от 1 до 512 символов.")
         return
     await state.update_data(title=value)
     if (await state.get_data()).get("editing"):
         await show_preview(message, state)
     else:
         await state.set_state(TaskWizard.description_choice)
-        await message.answer("Добавить описание?", reply_markup=keyboards.description())
+        await wizard_answer(
+            message, state, "Добавить описание?", reply_markup=keyboards.description()
+        )
 
 
 @router.callback_query(F.data.startswith("wiz:description:"))
 async def description_choice(callback: CallbackQuery, state: FSMContext) -> None:
     if callback.data.endswith(":add"):
         await state.set_state(TaskWizard.description)
-        await callback.message.answer("Напишите описание задачи обычным текстом или ссылкой.")
+        await wizard_answer(
+            callback.message, state, "Напишите описание задачи обычным текстом или ссылкой."
+        )
     else:
         await state.update_data(description=None)
         if (await state.get_data()).get("editing"):
             await show_preview(callback.message, state)
         else:
             await state.set_state(TaskWizard.priority)
-            await callback.message.answer(
-                "Выберите приоритет:", reply_markup=keyboards.priorities()
+            await wizard_answer(
+                callback.message, state, "Выберите приоритет:", reply_markup=keyboards.priorities()
             )
     await callback.answer()
 
 
 @router.message(TaskWizard.description, F.text)
 async def description_input(message: Message, state: FSMContext) -> None:
+    await remember_message(state, message)
     if len(message.text) > 3000:
-        await message.answer("Описание слишком длинное. Максимум 3000 символов.")
+        await wizard_answer(message, state, "Описание слишком длинное. Максимум 3000 символов.")
         return
     await state.update_data(description=message.text)
     if (await state.get_data()).get("editing"):
         await show_preview(message, state)
     else:
         await state.set_state(TaskWizard.priority)
-        await message.answer("Выберите приоритет:", reply_markup=keyboards.priorities())
+        await wizard_answer(
+            message, state, "Выберите приоритет:", reply_markup=keyboards.priorities()
+        )
 
 
 @router.callback_query(F.data.startswith("wiz:priority:"))
@@ -126,23 +145,27 @@ async def priority_choice(callback: CallbackQuery, state: FSMContext) -> None:
         await show_preview(callback.message, state)
     else:
         await state.set_state(TaskWizard.assignees)
-        await callback.message.answer(
+        await wizard_answer(
+            callback.message,
+            state,
             "Укажите исполнителя или исполнителей через @username одним сообщением.\n"
-            "Пример: @ivanov @petrov"
+            "Пример: @ivanov @petrov",
         )
     await callback.answer()
 
 
 @router.message(TaskWizard.assignees, F.text)
 async def assignees_input(message: Message, state: FSMContext, user_service) -> None:
+    await remember_message(state, message)
     try:
         usernames = parse_usernames(message.text)
         assignees = await user_service.resolve_assignees(usernames)
     except ValueError as exc:
-        await message.answer(str(exc))
+        await wizard_answer(message, state, str(exc))
         return
     except Exception as exc:
-        await answer_action_error(message, exc)
+        logger.exception("Could not resolve wizard assignees")
+        await wizard_answer(message, state, service_error(exc))
         return
     await state.update_data(
         assignee_user_ids=[assignee.user_id for assignee in assignees],
@@ -151,31 +174,36 @@ async def assignees_input(message: Message, state: FSMContext, user_service) -> 
     )
     for assignee in assignees:
         if not assignee.private_chat_started:
-            await message.answer(
+            await wizard_answer(
+                message,
+                state,
                 f"⚠️ @{assignee.username} ещё не активировал личные уведомления. "
                 "Ему необходимо открыть бота и нажать /start. "
-                "Задача всё равно будет создана, уведомления придут в беседу."
+                "Задача всё равно будет создана, уведомления придут в беседу.",
             )
     if (await state.get_data()).get("editing"):
         await show_preview(message, state)
     else:
         await state.set_state(TaskWizard.deadline)
-        await message.answer("Укажите дедлайн в формате ДД.ММ.ГГГГ.")
+        await wizard_answer(message, state, "Укажите дедлайн в формате ДД.ММ.ГГГГ.")
 
 
 @router.message(TaskWizard.deadline, F.text)
 async def deadline_input(message: Message, state: FSMContext) -> None:
+    await remember_message(state, message)
     try:
         due_at = parse_date(message.text)
     except ValueError as exc:
-        await message.answer(str(exc))
+        await wizard_answer(message, state, str(exc))
         return
     await state.update_data(due_at=due_at.isoformat())
     if (await state.get_data()).get("editing"):
         await show_preview(message, state)
     else:
         await state.set_state(TaskWizard.recurrence_choice)
-        await message.answer("Повторять задачу?", reply_markup=keyboards.repeat_choice())
+        await wizard_answer(
+            message, state, "Повторять задачу?", reply_markup=keyboards.repeat_choice()
+        )
 
 
 @router.callback_query(F.data.startswith("wiz:repeat:"))
@@ -185,18 +213,23 @@ async def repeat_choice(callback: CallbackQuery, state: FSMContext) -> None:
         await show_preview(callback.message, state)
     else:
         await state.set_state(TaskWizard.recurrence_interval)
-        await callback.message.answer("Введите целое положительное число — интервал повторения.")
+        await wizard_answer(
+            callback.message, state, "Введите целое положительное число — интервал повторения."
+        )
     await callback.answer()
 
 
 @router.message(TaskWizard.recurrence_interval, F.text)
 async def interval_input(message: Message, state: FSMContext) -> None:
+    await remember_message(state, message)
     if not message.text.isdecimal() or int(message.text) < 1:
-        await message.answer("Введите целое положительное число.")
+        await wizard_answer(message, state, "Введите целое положительное число.")
         return
     await state.update_data(interval_value=int(message.text))
     await state.set_state(TaskWizard.recurrence_unit)
-    await message.answer("Выберите единицу интервала:", reply_markup=keyboards.repeat_units())
+    await wizard_answer(
+        message, state, "Выберите единицу интервала:", reply_markup=keyboards.repeat_units()
+    )
 
 
 @router.callback_query(F.data.startswith("wiz:unit:"))
@@ -209,20 +242,25 @@ async def unit_choice(callback: CallbackQuery, state: FSMContext) -> None:
         return
     await state.update_data(interval_unit=value)
     await state.set_state(TaskWizard.recurrence_end)
-    await callback.message.answer("Укажите дату окончания серии в формате ДД.ММ.ГГГГ.")
+    await wizard_answer(
+        callback.message, state, "Укажите дату окончания серии в формате ДД.ММ.ГГГГ."
+    )
     await callback.answer()
 
 
 @router.message(TaskWizard.recurrence_end, F.text)
 async def recurrence_end_input(message: Message, state: FSMContext) -> None:
+    await remember_message(state, message)
     try:
         end = parse_date(message.text).date()
     except ValueError as exc:
-        await message.answer(str(exc))
+        await wizard_answer(message, state, str(exc))
         return
     data = await state.get_data()
     if end < datetime.fromisoformat(data["due_at"]).date():
-        await message.answer("Дата окончания серии должна быть не раньше первого дедлайна.")
+        await wizard_answer(
+            message, state, "Дата окончания серии должна быть не раньше первого дедлайна."
+        )
         return
     await state.update_data(
         recurrence={
@@ -238,7 +276,9 @@ async def show_preview(message: Message, state: FSMContext) -> None:
     await state.update_data(editing=False)
     await state.set_state(TaskWizard.preview)
     data = await state.get_data()
-    await message.answer(
+    await wizard_answer(
+        message,
+        state,
         draft_card(data, data["creator_username"], data["creator_telegram_id"]),
         reply_markup=keyboards.preview(),
         parse_mode="HTML",
@@ -248,7 +288,9 @@ async def show_preview(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data == "wiz:edit")
 async def edit_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(TaskWizard.edit_menu)
-    await callback.message.answer("Что изменить?", reply_markup=keyboards.draft_edit())
+    await wizard_answer(
+        callback.message, state, "Что изменить?", reply_markup=keyboards.draft_edit()
+    )
     await callback.answer()
 
 
@@ -259,27 +301,27 @@ async def edit_field(callback: CallbackQuery, state: FSMContext) -> None:
     match field:
         case "title":
             await state.set_state(TaskWizard.title)
-            await callback.message.answer("Напишите новое название.")
+            await wizard_answer(callback.message, state, "Напишите новое название.")
         case "description":
             await state.set_state(TaskWizard.description_choice)
-            await callback.message.answer(
-                "Изменить описание?", reply_markup=keyboards.description()
+            await wizard_answer(
+                callback.message, state, "Изменить описание?", reply_markup=keyboards.description()
             )
         case "priority":
             await state.set_state(TaskWizard.priority)
-            await callback.message.answer(
-                "Выберите приоритет:", reply_markup=keyboards.priorities()
+            await wizard_answer(
+                callback.message, state, "Выберите приоритет:", reply_markup=keyboards.priorities()
             )
         case "assignees":
             await state.set_state(TaskWizard.assignees)
-            await callback.message.answer("Укажите исполнителей через @username.")
+            await wizard_answer(callback.message, state, "Укажите исполнителей через @username.")
         case "deadline":
             await state.set_state(TaskWizard.deadline)
-            await callback.message.answer("Укажите дедлайн в формате ДД.ММ.ГГГГ.")
+            await wizard_answer(callback.message, state, "Укажите дедлайн в формате ДД.ММ.ГГГГ.")
         case "recurrence":
             await state.set_state(TaskWizard.recurrence_choice)
-            await callback.message.answer(
-                "Повторять задачу?", reply_markup=keyboards.repeat_choice()
+            await wizard_answer(
+                callback.message, state, "Повторять задачу?", reply_markup=keyboards.repeat_choice()
             )
     await callback.answer()
 
@@ -292,9 +334,14 @@ async def back_preview(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "wiz:cancel")
 async def cancel_wizard(callback: CallbackQuery, state: FSMContext) -> None:
+    cleaned = await cleanup_wizard(state, callback.bot)
     await state.clear()
-    await callback.message.answer("Создание задачи отменено.")
-    await callback.answer()
+    await callback.answer(
+        "Создание задачи отменено."
+        if cleaned
+        else "Создание отменено. Для очистки нужны права удаления сообщений.",
+        show_alert=not cleaned,
+    )
 
 
 @router.callback_query(F.data == "wiz:create")
@@ -338,8 +385,14 @@ async def confirm_task(
         await redis.delete(key)
         await answer_action_error(callback, exc)
         return
+    cleaned = await cleanup_wizard(state, callback.bot)
     await state.clear()
-    await callback.answer("Задача создана.")
+    await callback.answer(
+        "Задача создана."
+        if cleaned
+        else "Задача создана. Не удалось очистить мастер: проверьте права удаления сообщений.",
+        show_alert=not cleaned,
+    )
     try:
         await card_publisher.publish(task.id)
     except Exception:
