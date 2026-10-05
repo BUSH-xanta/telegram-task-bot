@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.common import BotTaskCardPublisher, TelegramMembershipProvider
 from app.db.models import Task
-from app.domain.enums import TaskPriority, TaskStatus
+from app.domain.enums import TaskStatus
 from app.scheduler.delivery import NotificationDispatcher
 from app.services.notification_service import NotificationService
 from app.services.task_service import TaskService
@@ -84,31 +84,7 @@ class SchedulerWorker:
                 return
 
     async def _refresh_schedules(self, now: datetime) -> None:
-        """Keep rolling urgent/overdue windows full without in-memory state."""
-        last_id = 0
-        while True:
-            async with self.session_factory.begin() as session:
-                ids = list(
-                    (
-                        await session.scalars(
-                            select(Task.id)
-                            .where(
-                                Task.id > last_id,
-                                Task.chat_id == self.allowed_chat_id,
-                                Task.status.in_((TaskStatus.NEW, TaskStatus.IN_PROGRESS)),
-                                or_(Task.priority == TaskPriority.URGENT, Task.due_at <= now),
-                            )
-                            .order_by(Task.id)
-                            .limit(100)
-                        )
-                    ).all()
-                )
-                service = NotificationService(session)
-                for task_id in ids:
-                    await service.schedule_task(task_id, now=now)
-            if not ids:
-                break
-            last_id = ids[-1]
+        """Only shared digests at 09:00 and 20:00 are scheduled."""
         async with self.session_factory.begin() as session:
             await NotificationService(session).schedule_digest(now=now)
 

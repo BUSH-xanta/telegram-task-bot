@@ -6,15 +6,9 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import NotificationDelivery, ScheduledNotification, Task
-from app.domain.enums import DeliveryStatus, NotificationStatus, NotificationType, TaskStatus
-from app.scheduler.jobs import (
-    Reminder,
-    future_reminders,
-    next_digest_time,
-    notification_key,
-    overdue_reminders,
-)
+from app.db.models import NotificationDelivery, ScheduledNotification
+from app.domain.enums import DeliveryStatus, NotificationStatus, NotificationType
+from app.scheduler.jobs import next_digest_time
 
 
 class NotificationService:
@@ -22,22 +16,8 @@ class NotificationService:
         self.session = session
 
     async def schedule_task(self, task_id: int, *, now: datetime | None = None) -> None:
-        now = now or datetime.now(UTC)
-        task = await self.session.get(Task, task_id)
-        if task is None or task.status in (
-            TaskStatus.COMPLETED,
-            TaskStatus.CANCELLED,
-            TaskStatus.WAITING_AUTHOR,
-        ):
-            return
-        if task.due_at > now:
-            reminders = future_reminders(
-                task.due_at, task.priority, now, created_at=task.created_at
-            )
-        else:
-            reminders = overdue_reminders(task.due_at, now)
-        for reminder in reminders:
-            await self._add(task_id, task.due_at, reminder)
+        """Individual task reminders are disabled; only shared digests are scheduled."""
+        return
 
     async def cancel_task(self, task_id: int) -> None:
         """Cancel unsent events; each delivery also checks task state before sending."""
@@ -78,25 +58,16 @@ class NotificationService:
     async def schedule_digest(self, *, now: datetime | None = None) -> None:
         now = now or datetime.now(UTC)
         when = next_digest_time(now)
-        statement = insert(ScheduledNotification).values(
-            task_id=None,
-            notification_type=NotificationType.DAILY_SUMMARY,
-            scheduled_at=when,
-            status=NotificationStatus.PENDING,
-            deduplication_key=f"digest:{when.date().isoformat()}",
-        )
-        await self.session.execute(
-            statement.on_conflict_do_nothing(index_elements=["deduplication_key"])
-        )
-
-    async def _add(self, task_id: int, due_at: datetime, reminder: Reminder) -> None:
-        statement = insert(ScheduledNotification).values(
-            task_id=task_id,
-            notification_type=reminder.kind,
-            scheduled_at=reminder.scheduled_at,
-            status=NotificationStatus.PENDING,
-            deduplication_key=notification_key(task_id, reminder, due_at),
-        )
-        await self.session.execute(
-            statement.on_conflict_do_nothing(index_elements=["deduplication_key"])
-        )
+        # Persist the next two slots so both morning and evening survive a restart.
+        for _ in range(2):
+            statement = insert(ScheduledNotification).values(
+                task_id=None,
+                notification_type=NotificationType.DAILY_SUMMARY,
+                scheduled_at=when,
+                status=NotificationStatus.PENDING,
+                deduplication_key=f"digest:{when.isoformat()}",
+            )
+            await self.session.execute(
+                statement.on_conflict_do_nothing(index_elements=["deduplication_key"])
+            )
+            when = next_digest_time(when)

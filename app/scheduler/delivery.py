@@ -11,8 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from app.db.models import NotificationDelivery, ScheduledNotification, Task, TaskAssignee, User
-from app.domain.enums import DeliveryStatus, NotificationStatus, NotificationType, TaskStatus
-from app.scheduler.render import digest_text, reminder_text
+from app.domain.enums import DeliveryStatus, NotificationStatus, TaskStatus
+from app.scheduler.render import digest_text
 
 logger = logging.getLogger(__name__)
 ACTIVE = (TaskStatus.NEW, TaskStatus.IN_PROGRESS)
@@ -54,39 +54,10 @@ class NotificationDispatcher:
                 if item.task_id is None:
                     recipients: list[tuple[int, int | None]] = [(self.allowed_chat_id, None)]
                 else:
-                    task = await session.get(Task, item.task_id)
-                    if task is None or task.status not in ACTIVE:
-                        item.status = NotificationStatus.CANCELLED
-                        item.claimed_until = None
-                        continue
-                    if (
-                        item.notification_type
-                        not in (NotificationType.OVERDUE, NotificationType.AT_DEADLINE)
-                        and now > task.due_at
-                    ):
-                        item.status = NotificationStatus.CANCELLED
-                        item.claimed_until = None
-                        continue
-                    if item.notification_type == NotificationType.URGENT and now >= task.due_at:
-                        item.status = NotificationStatus.CANCELLED
-                        item.claimed_until = None
-                        continue
-                    rows = await session.scalars(
-                        select(User)
-                        .join(TaskAssignee, TaskAssignee.user_id == User.id)
-                        .where(TaskAssignee.task_id == task.id)
-                    )
-                    recipients = [
-                        (user.telegram_user_id, user.id)
-                        for user in rows
-                        if user.private_chat_started and user.private_delivery_available
-                    ]
-                    if not recipients:
-                        item.status = NotificationStatus.CANCELLED
-                        item.processed_at = now
-                        item.claimed_until = None
-                        logger.info("No available private recipients for notification %s", item.id)
-                        continue
+                    item.status = NotificationStatus.CANCELLED
+                    item.processed_at = now
+                    item.claimed_until = None
+                    continue
                 for chat_id, user_id in recipients:
                     await session.execute(
                         insert(NotificationDelivery)
@@ -138,11 +109,10 @@ class NotificationDispatcher:
             ).first()
             if candidate is None:
                 return False
-            task = None
             if candidate.task_id is not None:
                 # Task services lock the task before cancelling its deliveries.
                 # Follow the same order to avoid a completion/send deadlock.
-                task = await session.scalar(
+                await session.scalar(
                     select(Task)
                     .options(selectinload(Task.assignees).selectinload(TaskAssignee.user))
                     .where(Task.id == candidate.task_id)
@@ -164,18 +134,11 @@ class NotificationDispatcher:
                 delivery.status = DeliveryStatus.UNAVAILABLE
                 return True
             if notification.task_id is not None:
-                # Also suppress group rows queued before the private-only policy.
-                if delivery.recipient_user_id is None:
-                    delivery.status = DeliveryStatus.UNAVAILABLE
-                    delivery.claimed_until = None
-                    await self._finish_if_done(session, notification.id)
-                    return True
-                if task is None or task.status not in ACTIVE:
-                    delivery.status = DeliveryStatus.UNAVAILABLE
-                    await self._finish_if_done(session, notification.id)
-                    return True
-                users = [row.user for row in task.assignees]
-                message = reminder_text(task, notification.notification_type, users)
+                # Suppress all old per-task deliveries, including private retries.
+                delivery.status = DeliveryStatus.UNAVAILABLE
+                delivery.claimed_until = None
+                await self._finish_if_done(session, notification.id)
+                return True
             else:
                 tasks = list(
                     (

@@ -114,8 +114,11 @@ def next_digest_time(now: datetime) -> datetime:
     if now.tzinfo is None:
         raise ValueError("Notification datetime must be timezone aware")
     local_now = now.astimezone(MOSCOW)
-    today = _morning(local_now.date(), 20)
-    return today if today > local_now else today + timedelta(days=1)
+    for hour in (9, 20):
+        slot = _morning(local_now.date(), hour)
+        if slot > local_now:
+            return slot
+    return _morning(local_now.date() + timedelta(days=1), 9)
 
 
 def notification_key(task_id: int, reminder: Reminder, due_at: datetime) -> str:

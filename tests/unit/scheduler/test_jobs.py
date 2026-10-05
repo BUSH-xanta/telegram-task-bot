@@ -72,11 +72,14 @@ def test_overdue_slots_and_deadline_merge() -> None:
     assert all(r.kind == NotificationType.OVERDUE for r in reminders)
 
 
-def test_digest_runs_at_twenty_moscow() -> None:
-    before = datetime(2026, 9, 26, 16, 59, tzinfo=UTC)
-    after = datetime(2026, 9, 26, 17, 1, tzinfo=UTC)
-    assert next_digest_time(before) == datetime(2026, 9, 26, 20, tzinfo=MOSCOW)
-    assert next_digest_time(after) == datetime(2026, 9, 27, 20, tzinfo=MOSCOW)
+@pytest.mark.parametrize(
+    "hour, minute, day, expected_hour",
+    [(8, 59, 26, 9), (9, 0, 26, 20), (19, 59, 26, 20), (20, 0, 27, 9)],
+)
+def test_digest_runs_only_at_nine_and_twenty_moscow(hour, minute, day, expected_hour):
+    now = datetime(2026, 9, 26, hour, minute, tzinfo=MOSCOW)
+    assert next_digest_time(now) == datetime(2026, 9, day, expected_hour, tzinfo=MOSCOW)
+    assert next_digest_time(now.astimezone(UTC)) == next_digest_time(now)
 
 
 def test_naive_times_rejected() -> None:

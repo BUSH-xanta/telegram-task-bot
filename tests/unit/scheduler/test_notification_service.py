@@ -24,18 +24,26 @@ def _task(status: TaskStatus = TaskStatus.NEW, priority: TaskPriority = TaskPrio
 
 
 @pytest.mark.asyncio
-async def test_schedule_task_persists_six_unique_events_without_commit() -> None:
+@pytest.mark.parametrize("priority", list(TaskPriority))
+async def test_tasks_do_not_schedule_individual_reminders(priority):
     session = AsyncMock()
-    session.get.return_value = _task()
-    service = NotificationService(session)
-    await service.schedule_task(42, now=datetime(2026, 9, 20, tzinfo=MOSCOW))
-    assert session.execute.await_count == 6
-    keys = []
-    for call in session.execute.await_args_list:
-        params = call.args[0].compile(dialect=postgresql.dialect()).params
-        keys.append(params["deduplication_key"])
-    assert len(set(keys)) == 6
-    session.commit.assert_not_awaited()
+    session.get.return_value = _task(priority=priority)
+    await NotificationService(session).schedule_task(42, now=datetime(2026, 9, 20, tzinfo=MOSCOW))
+    session.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_two_digest_slots_have_distinct_persistent_keys():
+    session = AsyncMock()
+    await NotificationService(session).schedule_digest(now=datetime(2026, 9, 20, 8, tzinfo=MOSCOW))
+    params = [
+        call.args[0].compile(dialect=postgresql.dialect()).params
+        for call in session.execute.await_args_list
+    ]
+    assert [row["scheduled_at"].hour for row in params] == [9, 20]
+    assert len({row["deduplication_key"] for row in params}) == 2
+    assert all(row["task_id"] is None for row in params)
+    assert all("DO NOTHING" in str(call.args[0]) for call in session.execute.await_args_list)
 
 
 @pytest.mark.asyncio
