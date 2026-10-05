@@ -179,7 +179,8 @@ async def assignees_input(message: Message, state: FSMContext, user_service) -> 
                 state,
                 f"⚠️ @{assignee.username} ещё не активировал личные уведомления. "
                 "Ему необходимо открыть бота и нажать /start. "
-                "Задача всё равно будет создана, уведомления придут в беседу.",
+                "Задача всё равно будет создана, но личные напоминания станут доступны "
+                "только после /start. В общую беседу напоминания не отправляются.",
             )
     if (await state.get_data()).get("editing"):
         await show_preview(message, state)

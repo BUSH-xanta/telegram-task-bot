@@ -76,11 +76,17 @@ class NotificationDispatcher:
                         .join(TaskAssignee, TaskAssignee.user_id == User.id)
                         .where(TaskAssignee.task_id == task.id)
                     )
-                    recipients = [(self.allowed_chat_id, None)] + [
+                    recipients = [
                         (user.telegram_user_id, user.id)
                         for user in rows
                         if user.private_chat_started and user.private_delivery_available
                     ]
+                    if not recipients:
+                        item.status = NotificationStatus.CANCELLED
+                        item.processed_at = now
+                        item.claimed_until = None
+                        logger.info("No available private recipients for notification %s", item.id)
+                        continue
                 for chat_id, user_id in recipients:
                     await session.execute(
                         insert(NotificationDelivery)
@@ -158,6 +164,12 @@ class NotificationDispatcher:
                 delivery.status = DeliveryStatus.UNAVAILABLE
                 return True
             if notification.task_id is not None:
+                # Also suppress group rows queued before the private-only policy.
+                if delivery.recipient_user_id is None:
+                    delivery.status = DeliveryStatus.UNAVAILABLE
+                    delivery.claimed_until = None
+                    await self._finish_if_done(session, notification.id)
+                    return True
                 if task is None or task.status not in ACTIVE:
                     delivery.status = DeliveryStatus.UNAVAILABLE
                     await self._finish_if_done(session, notification.id)
